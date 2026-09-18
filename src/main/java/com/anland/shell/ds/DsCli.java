@@ -2,6 +2,10 @@ package com.anland.shell.ds;
 
 import android.util.Base64;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,7 +14,8 @@ import java.util.List;
  * All droidspaces CLI interaction, run as root through {@link RootExec}.
  *
  * Conventions (Droidspaces-OSS):
- *   show --format → CONT_<name>=<pid> KEY=VALUE lines
+ *   show --format → current Droidspaces JSON, or legacy
+ *                   CONT_<name>=<pid> KEY=VALUE lines
  *   -n <name> pid → init PID or NONE
  *   --config <path> start → boot the container (boot-module convention)
  *   -n <name> run <arg> → execute inside the container (root, sh -c when the
@@ -125,10 +130,31 @@ public final class DsCli {
         if (bin == null)
             return out;
 
-        /* running map from show --format (CONT_<name>=<pid>) */
+        /* Running map from current JSON or legacy CONT_<name>=<pid> output. */
         RootExec.Result r = RootExec.exec(bin + " show --format", 15_000);
         List<ContainerState> running = new ArrayList<>();
-        if (r.stdout != null) {
+        if (r.stdout != null && r.stdout.trim().startsWith("{")) {
+            try {
+                JSONArray entries = new JSONObject(r.stdout).optJSONArray("running");
+                if (entries != null) {
+                    for (int i = 0; i < entries.length(); i++) {
+                        JSONObject entry = entries.optJSONObject(i);
+                        if (entry == null)
+                            continue;
+                        String name = entry.optString("name", "");
+                        int pid = entry.optInt("pid", -1);
+                        if (name.isEmpty() || name.contains("/") || pid <= 0)
+                            continue;
+                        ContainerState c = new ContainerState(
+                                name, CONTAINERS + "/" + name + "/container.config");
+                        c.pid = pid;
+                        running.add(c);
+                    }
+                }
+            } catch (JSONException ignored) {
+                /* Invalid output is treated as an empty running set. */
+            }
+        } else if (r.stdout != null) {
             for (String line : r.stdout.split("\n")) {
                 line = line.trim();
                 if (!line.startsWith("CONT_"))
@@ -140,7 +166,12 @@ public final class DsCli {
                 String name = rest.substring(0, eq);
                 int pid;
                 try {
-                    pid = Integer.parseInt(rest.substring(eq + 1).trim());
+                    String pidText = rest.substring(eq + 1).trim();
+                    int end = 0;
+                    while (end < pidText.length() &&
+                            !Character.isWhitespace(pidText.charAt(end)))
+                        end++;
+                    pid = Integer.parseInt(pidText.substring(0, end));
                 } catch (NumberFormatException e) {
                     continue;
                 }
@@ -486,10 +517,10 @@ public final class DsCli {
         return "";
     }
 
-    /** Whether the anland session (rootless Xwayland + mini-wm user service)
-     *  is installed for the launch user — setupanlandx.sh drops anland-session
-     *  (previously anlandx-start) into that user's ~/.local/bin. user "" =
-     *  auto ({@link #autoUser}). */
+    /** Whether the Anland session (rootless Xwayland + mini-wm) is available
+     *  for the launch user. The native package installs it in /usr/bin;
+     *  older source-tarball installs used ~/.local/bin/anland-session (or
+     *  the legacy anlandx-start). user "" = auto ({@link #autoUser}). */
     public static boolean anlandxInstalled(String name, String user) {
         if (user == null || user.isEmpty())
             user = autoUser(name);
@@ -498,8 +529,9 @@ public final class DsCli {
         RootExec.Result r = runSh(name,
                 "home=$(getent passwd " + ShellUtils.shQuote(user) +
                 " | cut -d: -f6)\n" +
-                "[ -n \"$home\" ] && { [ -x \"$home/.local/bin/anland-session\" ]" +
-                " || [ -x \"$home/.local/bin/anlandx-start\" ]; }",
+                "[ -x /usr/bin/anland-session ] || { [ -n \"$home\" ] && " +
+                "{ [ -x \"$home/.local/bin/anland-session\" ] || " +
+                "[ -x \"$home/.local/bin/anlandx-start\" ]; }; }",
                 15_000);
         return r.ok;
     }
