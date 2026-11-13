@@ -14,7 +14,7 @@ import java.util.List;
  * All droidspaces CLI interaction, run as root through {@link RootExec}.
  *
  * Conventions (Droidspaces-OSS):
- *   show --format → current Droidspaces JSON, or legacy
+ *   show --json (older: --format) → current Droidspaces JSON, or legacy
  *                   CONT_<name>=<pid> KEY=VALUE lines
  *   -n <name> pid → init PID or NONE
  *   --config <path> start → boot the container (boot-module convention)
@@ -131,7 +131,11 @@ public final class DsCli {
             return out;
 
         /* Running map from current JSON or legacy CONT_<name>=<pid> output. */
-        RootExec.Result r = RootExec.exec(bin + " show --format", 15_000);
+        RootExec.Result r = RootExec.exec(bin + " show --json", 15_000);
+        // Droidspaces <= 7.0 used --format. Keep rollback and mixed-version
+        // installations working while the host runtime is upgraded.
+        if (!r.ok)
+            r = RootExec.exec(bin + " show --format", 15_000);
         List<ContainerState> running = new ArrayList<>();
         if (r.stdout != null && r.stdout.trim().startsWith("{")) {
             try {
@@ -197,7 +201,7 @@ public final class DsCli {
             }
         }
 
-        /* merge: running first (with their pids from show --format), then
+        /* merge: running first (with their pids from show), then
          * stopped defined ones; running containers missing from Containers/
          * are still shown */
         running.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
